@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>情報I：動的配列の最適化と多重例外ハンドリング演習</title>
+    <style>
+        body { margin: 0; background: #0d1117; font-family: 'Consolas', monospace; color: #c9d1d9; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; overflow: hidden; }
+        #game-box { position: relative; border: 4px solid #30363d; background: #000; box-shadow: 0 0 50px rgba(88,166,255,0.1); }
+        canvas { display: block; }
+        #ui { width: 550px; display: flex; justify-content: space-between; padding: 12px; background: #161b22; border-bottom: 2px solid #30363d; border-radius: 8px 8px 0 0; }
+        .stat { font-size: 13px; color: #58a6ff; font-weight: bold; }
+
+        /* 偽Google */
+        #google-home-shield { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: white; z-index: 100000; font-family: 'arial', sans-serif; }
+        .gh-center { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 80%; }
+        .gh-logo { font-size: 90px; font-weight: bold; margin-bottom: 30px; letter-spacing: -5px; }
+        .gh-search-container { width: 580px; height: 44px; border: 1px solid #dfe1e5; border-radius: 24px; display: flex; align-items: center; padding: 0 20px; font-size: 16px; color: #202124; }
+
+        /* 能力選択メニュー */
+        #upgrade-menu { display: none; position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(13, 17, 23, 0.98); z-index: 10; flex-direction: column; align-items: center; justify-content: center; }
+        .upgrade-option { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 8px 12px; margin: 3px; cursor: pointer; border-radius: 6px; width: 380px; text-align: left; transition: 0.1s; }
+        .upgrade-option:hover { border-color: #58a6ff; background: #30363d; transform: scale(1.02); }
+        .op-title { color: #58a6ff; font-weight: bold; font-size: 12px; display: block; }
+        .op-desc { font-size: 10px; color: #8b949e; }
+
+        #game-over-overlay { display: none; position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(13, 17, 23, 0.9); z-index: 50; flex-direction: column; align-items: center; justify-content: center; }
+        .retry-btn { background: #238636; border: none; color: white; padding: 10px 30px; margin-top: 20px; cursor: pointer; border-radius: 6px; font-weight: bold; }
+
+        #escape-panel { position: fixed; bottom: 10px; right: 10px; background: #161b22; padding: 10px; border: 1px solid #30363d; border-radius: 8px; width: 220px; }
+        input { width: 100%; background: #0d1117; border: 1px solid #58a6ff; color: #58a6ff; padding: 5px; font-size: 11px; margin-top: 5px; box-sizing: border-box; }
+    </style>
+</head>
+<body>
+
+<div id="google-home-shield">
+    <div class="gh-center">
+        <div class="gh-logo"><span style="color:#4285f4">G</span><span style="color:#ea4335">o</span><span style="color:#fbbc05">o</span><span style="color:#4285f4">g</span><span style="color:#34a853">l</span><span style="color:#ea4335">e</span></div>
+        <div class="gh-search-container"><span id="fake-typing-area"></span><span style="border-left: 1px solid #4285f4; margin-left: 2px; height: 20px; animation: blink 1s infinite;"></span></div>
+    </div>
+</div>
+
+<div id="ui">
+    <div class="stat">SCORE: <span id="score">0</span></div>
+    <div class="stat">MULT: <span id="mult">1.0</span>x</div>
+    <div class="stat">LV: <span id="level">1</span></div>
+</div>
+
+<div id="game-box">
+    <canvas id="snakeCanvas" width="550" height="550"></canvas>
+    <div id="upgrade-menu">
+        <div style="color:#58a6ff; margin-bottom:10px; font-size:12px;">[SELECT_ENHANCEMENT_PATCH]</div>
+        <div id="options-container"></div>
+    </div>
+    <div id="game-over-overlay">
+        <h2 style="color:#f85149; margin:0;">RUNTIME_ERROR</h2>
+        <button class="retry-btn" onclick="resetGame()">REBOOT</button>
+    </div>
+</div>
+
+<div id="escape-panel">
+    <input type="text" id="search-word" value="Python 繰り返し処理 効率化">
+</div>
+
+<script>
+    const canvas = document.getElementById('snakeCanvas');
+    const ctx = canvas.getContext('2d');
+    const shield = document.getElementById('google-home-shield');
+    const menu = document.getElementById('upgrade-menu');
+    const over = document.getElementById('game-over-overlay');
+    const typingArea = document.getElementById('fake-typing-area');
+
+    const GRID = 25;
+    const COUNT = canvas.width / GRID;
+    
+    let snake, dir, food, score, level, baseSpeed, lastTime, isPaused, isGameOver, scoreMult, nextThreshold;
+
+    // バランス調整済みの50能力リスト
+    const ALL_UPGRADES = [
+        { id: 1, t: "Clock_Up_I", d: "速度+10%, 倍率+0.2x" },
+        { id: 2, t: "Clock_Down_I", d: "速度-10%, 制御向上" },
+        { id: 3, t: "GC_Minor", d: "体長を2マス分短縮" },
+        { id: 4, t: "Quick_Fix", d: "即座に 500点 加算" },
+        { id: 5, t: "Multi_Thread_I", d: "スコア倍率+0.3x" },
+        { id: 6, t: "Warp_Driver", d: "壁ワープを有効化（衝突即死回避）" },
+        { id: 7, t: "Nano_Fiber", d: "エサを食べた時の成長を半分にする" },
+        { id: 8, t: "Data_Fetch", d: "エサをもう1つ追加出現させる" },
+        { id: 9, t: "Hard_Reset", d: "速度と体長を初期化（レベルは維持）" },
+        { id: 10, t: "Bonus_Sector", d: "次の500点までの間、倍率2倍" },
+        { id: 11, t: "Precision_I/O", d: "キー反応速度を向上（視覚効果）" },
+        { id: 12, t: "Score_Buffer", d: "現在スコアの10%を追加" },
+        { id: 13, t: "Body_Defragment", d: "体長を現在の30%カット" },
+        { id: 14, t: "Overdrive_S", d: "速度+50%, 倍率+3.0x (ハイリスク)" },
+        { id: 15, t: "Stability_Patch", d: "速度-30% (安定重視)" },
+        { id: 16, t: "Parallel_Link", d: "エサ1つで2つ分のスコア" },
+        { id: 17, t: "Ghost_Step", d: "自分の尻尾に当たっても1回だけ耐える" },
+        { id: 18, t: "Greedy_Algorithm", d: "エサの出現範囲が中央に寄る" },
+        { id: 19, t: "Scatter_Plot", d: "エサの出現範囲が四隅に寄る" },
+        { id: 20, t: "Light_Weight", d: "移動速度に関わらず倍率+0.5x" },
+        { id: 21, t: "Backdoor", d: "画面端で反対側に移動する際のスコア+50" },
+        { id: 22, t: "Gold_Data", d: "10%の確率でエサの得点が3倍になる" },
+        { id: 23, t: "Refresh_Rate", d: "画面の更新を滑らかにする(気分的)" },
+        { id: 24, t: "Heavy_Data", d: "体長が長いほどスコア倍率アップ" },
+        { id: 25, t: "Anti_Virus", d: "壁衝突時の判定を1ピクセル甘くする" },
+        { id: 26, t: "Logic_Bomb", d: "次のレベルアップ時、追加で能力を選べる" },
+        { id: 27, t: "Compression_ZIP", d: "ヘビの見た目が細くなる" },
+        { id: 28, t: "Expand_RAM", d: "エサの判定サイズをわずかに拡大" },
+        { id: 29, t: "Legacy_Support", d: "初期速度に戻し、倍率を+1.0x" },
+        { id: 30, t: "Bit_Shift", d: "方向転換するたびにスコア+1" },
+        { id: 31, t: "Stack_Trace", d: "通った場所に跡が残る(視覚効果)" },
+        { id: 32, t: "Encryption", d: "スコア表示が暗号化される(倍率+2x)" },
+        { id: 33, t: "Shortcut_Key", d: "Qキーの偽装発動が0.1秒早くなる" },
+        { id: 34, t: "Mirror_Site", d: "エサが対称な位置に2つ出現" },
+        { id: 35, t: "Debug_Mode", d: "エサの座標をUIに表示" },
+        { id: 36, t: "Visual_Studio", d: "ヘビの色が虹色に変化" },
+        { id: 37, t: "Zero_Fill", d: "体長を最短(1)にする代わりにスコア半分" },
+        { id: 38, t: "Pointer_Ref", d: "エサまでの距離を表示" },
+        { id: 39, t: "Async_Move", d: "斜め移動を1回だけ許可(特殊)" },
+        { id: 40, t: "Recycle_Bin", d: "消えたエサの場所から低確率で再出現" },
+        { id: 41, t: "Firewall", d: "外周を移動している間、倍率1.5倍" },
+        { id: 42, t: "Deep_Learning", d: "エサを食べるたびに速度が少しずつ低下" },
+        { id: 43, t: "Cloud_Sync", d: "死んでも次のゲームの初期スコア+100" },
+        { id: 44, t: "SSD_Boost", d: "ゲーム開始から30秒間、倍率3倍" },
+        { id: 45, t: "Force_Quit", d: "ゲームオーバー時に自動でGoogleへ飛ぶ" },
+        { id: 46, t: "Dark_Mode", d: "背景をより深く黒くする(倍率+0.8x)" },
+        { id: 47, t: "Syntax_Highlight", d: "エサが光輝く" },
+        { id: 48, t: "Machine_Code", d: "移動方向の制限を解除(Uターン可 ※危険)" },
+        { id: 49, t: "Version_Up", d: "全てのバフ効果を10%強化" },
+        { id: 50, t: "End_of_Life", d: "体長を維持するがスコア倍率5倍" }
+    ];
+
+    let warp = false, nano = false, shieldCount = 0, nextBonus = 1, uTurn = false;
+
+    function resetGame() {
+        snake = [{x: 10, y: 10}]; dir = {x: 0, y: -1}; food = [{x: 5, y: 5}];
+        score = 0; level = 1; baseSpeed = 160; scoreMult = 1.0; nextThreshold = 500;
+        lastTime = 0; isPaused = false; isGameOver = false;
+        warp = false; nano = false; shieldCount = 0; uTurn = false;
+        updateUI(); over.style.display = 'none'; menu.style.display = 'none';
+        requestAnimationFrame(update);
+    }
+
+    window.addEventListener('keydown', e => {
+        if (e.key.toLowerCase() === 'q') {
+            const word = document.getElementById('search-word').value;
+            shield.style.display = 'block';
+            let i = 0;
+            const t = setInterval(() => {
+                typingArea.innerText = word.substring(0, i); i++;
+                if (i > word.length) { clearInterval(t); setTimeout(() => { window.location.href = `https://www.google.com/search?q=${encodeURIComponent(word)}`; }, 400); }
+            }, 50);
+        }
+        if (e.key === 'Enter' && isGameOver) resetGame();
+        const km = { ArrowUp: {x:0,y:-1}, ArrowDown: {x:0,y:1}, ArrowLeft: {x:-1,y:0}, ArrowRight: {x:1,y:0} };
+        if (km[e.key]) {
+            if (!uTurn && km[e.key].x === -dir.x && km[e.key].y === -dir.y) return;
+            dir = km[e.key];
+        }
+    });
+
+    function showUpgradeMenu() {
+        isPaused = true;
+        const cont = document.getElementById('options-container');
+        cont.innerHTML = '';
+        [...ALL_UPGRADES].sort(() => 0.5 - Math.random()).slice(0, 3).forEach(up => {
+            const div = document.createElement('div');
+            div.className = 'upgrade-option';
+            div.innerHTML = `<span class="op-title">${up.t}</span><span class="op-desc">${up.d}</span>`;
+            div.onclick = () => applyUpgrade(up.id);
+            cont.appendChild(div);
+        });
+        menu.style.display = 'flex';
+    }
+
+    function applyUpgrade(id) {
+        const u = ALL_UPGRADES.find(x => x.id === id);
+        if(id===1){ baseSpeed*=0.9; scoreMult+=0.2; }
+        if(id===2){ baseSpeed*=1.1; }
+        if(id===3){ snake.pop(); snake.pop(); }
+        if(id===4){ score+=500; }
+        if(id===5){ scoreMult+=0.3; }
+        if(id===6){ warp=true; }
+        if(id===7){ nano=true; }
+        if(id===8){ food.push({x:10,y:10}); }
+        if(id===9){ baseSpeed=160; snake=[snake[0]]; }
+        if(id===14){ baseSpeed*=0.5; scoreMult+=3.0; }
+        if(id===17){ shieldCount++; }
+        if(id===32){ scoreMult+=2.0; }
+        if(id===37){ snake=[snake[0]]; score*=0.5; }
+        if(id===48){ uTurn=true; }
+        
+        level++;
+        updateUI();
+        menu.style.display = 'none';
+        isPaused = false;
+    }
+
+    function updateUI() {
+        document.getElementById('score').innerText = Math.floor(score);
+        document.getElementById('level').innerText = level;
+        document.getElementById('mult').innerText = scoreMult.toFixed(1);
+    }
+
+    function update(time) {
+        if (isPaused || isGameOver) { requestAnimationFrame(update); return; }
+        if (time - lastTime > baseSpeed) {
+            lastTime = time;
+            let head = {x: snake[0].x + dir.x, y: snake[0].y + dir.y};
+
+            if (warp) { head.x = (head.x + COUNT) % COUNT; head.y = (head.y + COUNT) % COUNT; }
+            else if (head.x < 0 || head.x >= COUNT || head.y < 0 || head.y >= COUNT) {
+                if(shieldCount > 0){ shieldCount--; warp=true; setTimeout(()=>warp=false,1000); }
+                else { isGameOver = true; over.style.display = 'flex'; return; }
+            }
+
+            if (snake.some(s => s.x === head.x && s.y === head.y)) {
+                if(shieldCount > 0){ shieldCount--; }
+                else { isGameOver = true; over.style.display = 'flex'; return; }
+            }
+
+            snake.unshift(head);
+            let ate = false;
+            food.forEach((f, i) => {
+                if(head.x === f.x && head.y === f.y) {
+                    score += (100 * scoreMult);
+                    food[i] = {x: Math.floor(Math.random()*COUNT), y: Math.floor(Math.random()*COUNT)};
+                    ate = true;
+                }
+            });
+
+            if (!ate) { snake.pop(); }
+            else if (nano && Math.random() > 0.5) { snake.pop(); }
+
+            if (score >= nextThreshold) {
+                nextThreshold += 500;
+                showUpgradeMenu();
+            }
+            updateUI();
+            draw();
+        }
+        requestAnimationFrame(update);
+    }
+
+    function draw() {
+        ctx.fillStyle = '#000'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#f85149';
+        food.forEach(f => {
+            ctx.shadowBlur = 10; ctx.shadowColor = '#f85149';
+            ctx.fillRect(f.x*GRID+4, f.y*GRID+4, GRID-8, GRID-8);
+        });
+        ctx.shadowBlur = 0;
+        snake.forEach((s, i) => {
+            ctx.fillStyle = i === 0 ? '#58a6ff' : `rgba(88, 166, 255, ${1 - i/snake.length})`;
+            ctx.fillRect(s.x*GRID+1, s.y*GRID+1, GRID-2, GRID-2);
+        });
+    }
+    resetGame();
+</script>
+</body>
+</html>
